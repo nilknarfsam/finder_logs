@@ -11,6 +11,13 @@ historico = []
 
 # ======================= Funções Utilitárias ========================
 
+def detectar_tipo_log(conteudo, nome_arquivo):
+    if nome_arquivo.lower().endswith(('.csv', '.dcl')):
+        linhas = [l.strip() for l in conteudo.splitlines() if l.strip()]
+        if linhas and linhas[0].count(",") >= 4:
+            return "TRI"
+    return "AGILENT"
+
 def tentar_ler_arquivo(filepath):
     for enc in ['utf-8', 'utf-16', 'latin1']:
         try:
@@ -51,7 +58,7 @@ def buscar_logs(event=None):
     for diretorio in diretorios:
         for root, dirs, files in os.walk(diretorio):
             for file in files:
-                if (file.lower().endswith(".csv") or file.lower().endswith(".dcl")) and termo in file:
+                if (file.lower().endswith(".csv") or file.lower().endswith(".dcl") or file.lower().endswith(".txt")) and termo in file:
                     arquivos.append(os.path.join(root, file))
     listbox_logs.delete(0, tk.END)
     listbox_logs.file_paths = {}
@@ -76,24 +83,66 @@ def exibir_log(event=None):
     nome_arquivo = listbox_logs.get(index)
     arquivo = listbox_logs.file_paths[nome_arquivo]
     conteudo = tentar_ler_arquivo(arquivo)
-    if conteudo:
+    if not conteudo:
+        return
+    tipo = detectar_tipo_log(conteudo, nome_arquivo)
+    # Esconde ambos os painéis antes de mostrar
+    tabela_frame.pack_forget()
+    painel_agilent.pack_forget()
+
+    if tipo == "TRI":
         serial, data, hora, erro = extrair_info_arquivo(arquivo)
         atualizar_painel_destaque(serial, data, hora, erro)
-        text_area.configure(state="normal")
-        text_area.delete("1.0", tk.END)
-        text_area.insert(tk.END, conteudo)
-        text_area.configure(state="disabled")
-        status = "ok"
-        if "fail" in nome_arquivo.lower() or "f" in erro.lower():
-            status = "fail"
-        historico.append({
-            "serial": serial,
-            "nome_arquivo": nome_arquivo,
-            "data": data,
-            "hora": hora,
-            "status": status
-        })
-        atualizar_historico_visual()
+        for row in tree.get_children():
+            tree.delete(row)
+        linhas = conteudo.splitlines()
+        for linha in linhas[1:]:
+            if not linha.strip():
+                continue
+            dados = [v.strip() for v in linha.split(",")]
+            while len(dados) < 13:
+                dados.append("")
+            tree.insert("", "end", values=dados)
+        tabela_frame.pack(pady=6, fill="x")
+    else:
+        text_agilent.config(state="normal")
+        text_agilent.delete("1.0", tk.END)
+        blocos = []
+        linhas = conteudo.splitlines()
+        for idx, linha in enumerate(linhas):
+            if "HAS FAILED" in linha:
+                blocos.append(("FALHA", linha))
+                for i in range(1, 5):
+                    if idx + i < len(linhas) and ":" in linhas[idx + i]:
+                        blocos.append(("DETALHE", linhas[idx + i]))
+            if linha.startswith("Failed Open #"):
+                bloco = linha + "\n"
+                j = 1
+                while idx + j < len(linhas) and linhas[idx + j].strip():
+                    bloco += linhas[idx + j] + "\n"
+                    j += 1
+                blocos.append(("OPEN", bloco))
+        serial = ""
+        datahora = ""
+        for linha in linhas:
+            if linha.strip().startswith("Serial #:"):
+                serial = linha.strip().split(":")[-1].strip()
+            if any(mes in linha for mes in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]):
+                datahora = linha.strip()
+        text_agilent.insert(tk.END, f"Serial: {serial}\nData/Hora: {datahora}\n\n")
+        for tipo, bloco in blocos:
+            if tipo == "FALHA":
+                text_agilent.insert(tk.END, bloco + "\n", "falha")
+            elif tipo == "DETALHE":
+                text_agilent.insert(tk.END, "   " + bloco + "\n", "detalhe")
+            elif tipo == "OPEN":
+                text_agilent.insert(tk.END, "\n" + bloco + "\n", "open")
+        text_agilent.tag_config("falha", foreground="red", font=("Consolas", 11, "bold"))
+        text_agilent.tag_config("detalhe", foreground="blue")
+        text_agilent.tag_config("open", foreground="purple")
+        text_agilent.config(state="disabled")
+        painel_agilent.pack(pady=6, fill="both", expand=True)
+        atualizar_painel_destaque(serial, "", "", "")
 
 def copiar_log():
     index = listbox_logs.curselection()
@@ -221,6 +270,32 @@ root.geometry("1050x750")
 
 frame = ctk.CTkFrame(master=root)
 frame.pack(padx=20, pady=20, fill="both", expand=True)
+
+from tkinter import ttk
+
+# ... após o frame principal:
+colunas = [
+    "Step", "Part name", "Actual", "Standard", "High lim", "Low lim",
+    "Mode", "Type", "High pin", "Low pin", "Location", "Measure", "Result"
+]
+tabela_frame = ctk.CTkFrame(master=frame)
+tabela_frame.pack(pady=6, fill="x")
+tree = ttk.Treeview(tabela_frame, columns=colunas, show='headings', height=7)
+tree.pack(side="left", fill="x", expand=True)
+for col in colunas:
+    tree.heading(col, text=col)
+    tree.column(col, width=80, anchor="center")
+scroll_x = tk.Scrollbar(tabela_frame, orient="horizontal", command=tree.xview)
+tree.configure(xscrollcommand=scroll_x.set)
+scroll_x.pack(side="bottom", fill="x")
+tabela_frame.pack_forget()  # Esconde por padrão
+
+painel_agilent = ctk.CTkFrame(master=frame)
+painel_agilent.pack(pady=6, fill="both", expand=True)
+text_agilent = tk.Text(painel_agilent, width=110, height=12, font=("Consolas", 11), wrap="word", bg="#eaf0fa")
+text_agilent.pack(fill="both", expand=True)
+painel_agilent.pack_forget()  # Esconde por padrão
+
 
 # ---------- Painel de Destaque (Serial, Data, Hora, Erro, Status) ----------
 painel = ctk.CTkFrame(master=frame)
